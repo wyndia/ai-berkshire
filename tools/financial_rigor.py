@@ -16,6 +16,7 @@ Usage (called automatically by Skills, no manual execution needed):
 """
 
 import argparse
+import ast
 import json
 import math
 import sys
@@ -285,10 +286,49 @@ def benford_check(values: list):
 # 5. Exact Calculator (精确计算器)
 # ---------------------------------------------------------------------------
 
+_AST_BINOPS = {
+    ast.Add: _CTX.add,
+    ast.Sub: _CTX.subtract,
+    ast.Mult: _CTX.multiply,
+    ast.Div: _CTX.divide,
+    ast.Pow: _CTX.power,
+}
+
+
+def _eval_decimal_node(node):
+    """Recursively evaluate an AST node using exact Decimal arithmetic.
+
+    Each numeric literal is converted to Decimal via str() (exact() helper),
+    so arithmetic never touches binary floats — 0.1 + 0.2 stays 0.3.
+    """
+    if isinstance(node, ast.Expression):
+        return _eval_decimal_node(node.body)
+    if isinstance(node, ast.BinOp):
+        op = _AST_BINOPS.get(type(node.op))
+        if op is None:
+            raise ValueError(f"不支持的运算符: {type(node.op).__name__}")
+        return op(_eval_decimal_node(node.left), _eval_decimal_node(node.right))
+    if isinstance(node, ast.UnaryOp):
+        operand = _eval_decimal_node(node.operand)
+        if isinstance(node.op, ast.USub):
+            return -operand
+        if isinstance(node.op, ast.UAdd):
+            return operand
+        raise ValueError(f"不支持的一元运算符: {type(node.op).__name__}")
+    # Numeric literal (ast.Constant on 3.8+, ast.Num on 3.7)
+    if isinstance(node, ast.Constant) and isinstance(node.value, (int, float)):
+        return exact(node.value)
+    if isinstance(node, getattr(ast, "Num", ())):
+        return exact(node.n)
+    raise ValueError(f"不支持的表达式: {type(node).__name__}")
+
+
 def exact_calc(expr: str):
     """Evaluate a financial expression with exact decimal arithmetic.
 
-    Supports: +, -, *, /, (), numbers (including scientific notation).
+    Supports: +, -, *, /, **, (), numbers (including scientific notation).
+    Evaluates via an AST walk with Decimal operands — NOT float eval — so that
+    0.1 + 0.2 == 0.3 holds exactly (the whole point of this toolkit).
     """
     print("=" * 60)
     print("精确计算 (Exact Calculator)")
@@ -301,14 +341,13 @@ def exact_calc(expr: str):
         return None
 
     try:
-        # Replace scientific notation for Decimal compatibility
-        result = eval(expr, {"__builtins__": {}}, {})
-        d_result = exact(result)
+        tree = ast.parse(expr, mode="eval")
+        d_result = _eval_decimal_node(tree)
         print(f"  表达式: {expr}")
         print(f"  结果:   {fmt_number(d_result)}")
         print(f"  精确值: {d_result}")
         return float(d_result)
-    except Exception as e:
+    except (ValueError, SyntaxError, ArithmeticError, InvalidOperation) as e:
         print(f"  ❌ 计算错误: {e}")
         return None
 
